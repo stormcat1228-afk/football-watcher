@@ -1,20 +1,29 @@
 name: TD Alerts (Anytime & First Team)
 on:
   schedule:
-    # Runs every 15 min Thu–Mon. (UTC schedule; it's fine, code filters by today's games.)
-    - cron: "*/15 * * * 4-1"
+    # every 15 minutes on Thu, Fri, Sat, Sun, Mon (UTC)
+    - cron: "*/15 * * * 4"
+    - cron: "*/15 * * * 5"
+    - cron: "*/15 * * * 6"
+    - cron: "*/15 * * * 0"
+    - cron: "*/15 * * * 1"
   workflow_dispatch: {}
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
-    - run: pip install -r requirements.txt
-    - env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-      run: python -c "from src.td_alerts import run_td_alerts; run_td_alerts()"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Refresh today's games (auto)
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: python -c "from src.games_auto import refresh_today; refresh_today()"
+      - name: Run TD alerts
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: python -c "from src.td_alerts import run_td_alerts; run_td_alerts()"
