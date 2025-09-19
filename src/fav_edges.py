@@ -5,7 +5,7 @@
 import os, re, math, asyncio, requests, pytz
 from datetime import datetime
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
-from src.kickoff_gate import should_run_now
+from kickoff_gate import should_run_now
 
 # --- Telegram ---
 BOT = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOTFOOTBALL_TOKEN")
