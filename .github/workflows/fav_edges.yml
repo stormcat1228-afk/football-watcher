@@ -1,0 +1,42 @@
+name: Favorites & Coin-Flip (DK)
+
+on:
+  schedule:
+    # Run every 15 minutes on Thu, Fri, Sat, Sun, Mon (UTC)
+    - cron: "*/15 * * * 0,1,4,5,6"
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps
+
+      - name: Ensure files exist
+        run: |
+          test -f ./src/fav_edges.py || { echo "Missing ./src/fav_edges.py"; exit 1; }
+          test -f ./src/kickoff_gate.py || { echo "Missing ./src/kickoff_gate.py"; exit 1; }
+
+      - name: Run Favorites + Coin-Flip bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_BOTFOOTBALL_TOKEN: ${{ secrets.TELEGRAM_BOTFOOTBALL_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python ./src/fav_edges.py
