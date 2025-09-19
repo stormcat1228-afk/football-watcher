@@ -2,25 +2,44 @@ name: TD Alerts (Anytime & First Player)
 
 on:
   schedule:
-    # Every 15 minutes on Thu (4), Fri (5), Sat (6), Sun (0), Mon (1)
-    - cron: "*/15 * * * 0,1,4,5,6"
+    - cron: "*/15 * * * 0,1,4,5,6"   # every 15m Thu–Mon (UTC)
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # ---- Diagnostics to prove where the file is ----
+      - name: Print workspace and list repo
+        run: |
+          echo "Workspace: $GITHUB_WORKSPACE"
+          pwd
+          ls -la
+          echo "---- src contents ----"
+          ls -la src || true
+          echo "---- recursive tree ----"
+          find . -maxdepth 3 -type f | sort
+
+      - name: Ensure script exists
+        run: |
+          test -f ./src/scrape_props.py || { echo "MISSING ./src/scrape_props.py"; exit 1; }
+
+      # ---- Actual run ----
       - name: Run Scraper for Props
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOTFOOTBALL_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python src/scrape_props.py
+        working-directory: ${{ github.workspace }}
+        run: python ./src/scrape_props.py
