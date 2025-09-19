@@ -2,9 +2,10 @@ name: TD Alerts (Anytime & First Player)
 
 on:
   schedule:
-    # every 15 minutes on Thu, Fri, Sat, Sun, Mon (UTC)
-    - cron: "*/15 * * * 4-1"
+    # Every 15 minutes on Thu (4), Fri (5), Sat (6), Sun (0), Mon (1)
+    - cron: "*/15 * * * 0,1,4,5,6"
   workflow_dispatch: {}
+
 
 jobs:
   run:
