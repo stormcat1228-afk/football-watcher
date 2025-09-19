@@ -1,13 +1,11 @@
-name: TD Alerts (Anytime & First Team)
+name: TD Alerts (Anytime & First Player)
+
 on:
   schedule:
     # every 15 minutes on Thu, Fri, Sat, Sun, Mon (UTC)
-    - cron: "*/15 * * * 4"
-    - cron: "*/15 * * * 5"
-    - cron: "*/15 * * * 6"
-    - cron: "*/15 * * * 0"
-    - cron: "*/15 * * * 1"
+    - cron: "*/15 * * * 4-1"
   workflow_dispatch: {}
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -17,13 +15,9 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
-      - name: Refresh today's games (auto)
+      - name: Run Scraper for Props
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-        run: python -c "from src.games_auto import refresh_today; refresh_today()"
-      - name: Run TD alerts
-        env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOTFOOTBALL_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-        run: python -c "from src.td_alerts import run_td_alerts; run_td_alerts()"
+        run: python src/scrape_props.py
