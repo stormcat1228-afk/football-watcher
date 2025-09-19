@@ -4,8 +4,7 @@ on:
   schedule:
     # Every 15 minutes on Thu (4), Fri (5), Sat (6), Sun (0), Mon (1)
     - cron: "*/15 * * * 0,1,4,5,6"
-  workflow_dispatch: {}
-
+  workflow_dispatch:
 
 jobs:
   run:
@@ -15,7 +14,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       - name: Run Scraper for Props
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
