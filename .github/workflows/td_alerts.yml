@@ -2,13 +2,14 @@ name: TD Alerts (Anytime & First Player)
 
 on:
   schedule:
-    # Run every 15 minutes on Thu (4), Fri (5), Sat (6), Sun (0), Mon (1)
-    - cron: "*/15 * * * 0,1,4,5,6"
+    # Run every 15 minutes on Thu–Mon (football days)
+    - cron: "*/15 * * * 4,5,6,0,1"
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -20,17 +21,15 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
           playwright install --with-deps
 
       - name: Ensure script exists
-        run: |
-          test -f ./src/scrape_props.py || { echo "MISSING ./src/scrape_props.py"; exit 1; }
+        run: test -f ./src/scrape_props.py || { echo "MISSING ./src/scrape_props.py"; exit 1; }
 
       - name: Run Scraper for Props
         env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOTFOOTBALL_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python ./src/scrape_props.py
