@@ -1,248 +1,139 @@
-import os
-import re
-import json
-import asyncio
-from typing import List, Dict, Any, Optional
+# src/scrape_props.py
+import os, time, json, pytz, datetime as dt
 import requests
 
-from playwright.async_api import async_playwright, TimeoutError as PWTimeoutError
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
-# --------- Config / Constants ---------
+ET = pytz.timezone("America/New_York")
 
-# Markets we care about (case-insensitive contains match on the page)
-MARKET_ALIASES = {
-    "ANYTIME_TD": [
-        "anytime touchdown scorer",
-        "player to score a touchdown",
-        "player any time touchdown",
-        "anytime td scorer",
-    ],
-    "FIRST_TD": [
-        "first touchdown scorer",
-        "first td scorer",
-        "player to score first touchdown",
-    ],
-}
-
-# Very permissive player/odds patterns to rescue data when site structure changes.
-RE_PLAYER = re.compile(r"\b([A-Z][a-z]+(?:\s[JRMDKXVI]+\.?)?(?:\s[A-Z][a-z]+){0,2})\b")
-RE_ODDS   = re.compile(r"([+\-]\d{2,4})")
-
-# Optional: cap per-game rows to avoid spam
-MAX_ROWS_PER_MARKET = 12
-
-# --------- Telegram helper (self-contained) ---------
-
-def send_telegram(text: str) -> None:
-    """Post a message to Telegram (group or channel)."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
-        print("WARN: Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID; skipping Telegram send.")
+# ---- Telegram helper ---------------------------------------------------------
+def tg_send(text: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
         return
-    try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-        r = requests.post(url, json=payload, timeout=20)
-        if r.status_code != 200:
-            print(f"Telegram send failed: {r.status_code} {r.text}")
-    except Exception as e:
-        print(f"Telegram error: {e}")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    r = requests.post(url, json=payload, timeout=20)
+    if r.status_code != 200:
+        print("Telegram error:", r.text)
 
-# --------- File helpers ---------
+# ---- Bovada helpers ----------------------------------------------------------
+# Base endpoints: Bovada exposes JSON for events by league/sport.
+NFL_SPORT_ID = "football"   # high-level sport for menu
+BOVADA_BASE  = "https://www.bovada.lv"
+# A practical feed that lists upcoming events across Football
+EVENT_FEED   = "https://www.bovada.lv/services/sports/event/coupon/events/A/description/football?marketFilterId=def&preMatchOnly=true"
 
-def load_game_urls() -> List[Dict[str, Any]]:
-    """
-    Reads config/game_urls.json
+def fetch_bovada():
+    """Return raw JSON of football events (includes NFL)"""
+    r = requests.get(EVENT_FEED, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    return r.json()
 
-    Expected format:
-    [
-      {"book":"fanduel","home":"BUF","away":"NYJ","url":"https://www.fanduel.com/some-game-url"},
-      {"book":"draftkings","home":"DAL","away":"PHI","url":"https://sportsbook.draftkings.com/event/foo"}
-    ]
-    """
-    path = "config/game_urls.json"
-    if not os.path.exists(path):
-        # Create a stub so user can fill quickly
-        stub = [
-            {
-                "book": "fanduel",
-                "home": "BUF",
-                "away": "NYJ",
-                "url": "https://www.fanduel.com/"
-            }
-        ]
-        os.makedirs("config", exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(stub, f, indent=2)
-        print(f"Created stub {path}. Please edit with real event URLs.")
-        return []
-    with open(path, "r") as f:
-        data = json.load(f)
-    # sanitize
-    out = []
-    for row in data:
-        if isinstance(row, dict) and row.get("url"):
-            out.append(row)
+def unix_to_et(ts_ms: int) -> str:
+    t = dt.datetime.fromtimestamp(ts_ms/1000, tz=pytz.utc).astimezone(ET)
+    return t.strftime("%a %I:%M %p ET")
+
+def is_today_et(ts_ms: int) -> bool:
+    t = dt.datetime.fromtimestamp(ts_ms/1000, tz=pytz.utc).astimezone(ET).date()
+    return t == dt.datetime.now(ET).date()
+
+def collect_markets():
+    data = fetch_bovada()
+    # data is a list of groups; each group has "events" with displayGroups/markets
+    events = []
+    for group in data:
+        for ev in group.get("events", []):
+            # filter to today’s games only
+            if not is_today_et(ev.get("startTime", 0)):
+                continue
+            events.append(ev)
+    return events
+
+def pick_player_prop_markets(display_groups):
+    """Return dict with any/first TD markets if present."""
+    out = {"anytime": None, "first": None}
+    for dg in display_groups or []:
+        if "Player Props" not in (dg.get("description") or ""):
+            continue
+        for m in dg.get("markets", []):
+            name = (m.get("description") or "").lower()
+            if "anytime touchdown scorer" in name and out["anytime"] is None:
+                out["anytime"] = m
+            if "first touchdown scorer" in name and out["first"] is None:
+                out["first"] = m
     return out
 
-# --------- Scraping core ---------
+def parse_outcomes(market):
+    picks = []
+    if not market:
+        return picks
+    for o in market.get("outcomes", []):
+        player = o.get("description") or o.get("name") or ""
+        price  = o.get("price", {})
+        # American odds (may be in price['american'] or computed from 'decimal'])
+        american = price.get("american")
+        if american is None and "decimal" in price:
+            dec = float(price["decimal"])
+            # naive conversion
+            if dec >= 2.0:
+                american = int((dec - 1.0) * 100)
+            else:
+                american = int(-100 / (dec - 1.0))
+        if not player or american is None:
+            continue
+        picks.append((player.strip(), str(american)))
+    # keep top N shortest odds so the message is readable
+    return picks[:15]
 
-async def goto_safely(page, url: str, wait: float = 40000):
-    """Navigate and wait for network to be reasonably idle."""
+def build_message(ev, any_markets, first_markets):
+    home = ev.get("competitors", [{}])[0].get("name", "Home")
+    away = ev.get("competitors", [{}])[-1].get("name", "Away")
+    when = unix_to_et(ev.get("startTime", 0))
+
+    any_list  = parse_outcomes(any_markets)
+    first_list= parse_outcomes(first_markets)
+
+    lines = [f"🏈 <b>{away} at {home}</b> — {when}"]
+    if any_list:
+        lines.append("<b>Anytime TD (top lines)</b>")
+        for p, odds in any_list:
+            lines.append(f"• {p}: {odds}")
+    else:
+        lines.append("Anytime TD: (no market found)")
+
+    if first_list:
+        lines.append("<b>First TD Scorer (top lines)</b>")
+        for p, odds in first_list:
+            lines.append(f"• {p}: {odds}")
+    else:
+        lines.append("First TD Scorer: (no market found)")
+    return "\n".join(lines)
+
+def main():
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=wait)
-        # sites often lazy-load; give a short settle window
-        await page.wait_for_timeout(1500)
-    except PWTimeoutError:
-        print(f"Timeout reaching {url}")
+        events = collect_markets()
+        if not events:
+            tg_send("⚠️ No NFL events for today were found in Bovada feed.")
+            return
+
+        sent = 0
+        for ev in events:
+            dgs = ev.get("displayGroups", [])
+            picked = pick_player_prop_markets(dgs)
+            # Skip games that don’t have either market
+            if not picked["anytime"] and not picked["first"]:
+                continue
+            msg = build_message(ev, picked["anytime"], picked["first"])
+            tg_send(msg)
+            time.sleep(0.75)  # be polite to Telegram
+            sent += 1
+
+        if sent == 0:
+            tg_send("⚠️ NFL found, but no Anytime/First TD markets were present yet.")
     except Exception as e:
-        print(f"goto error {url}: {e}")
-
-async def find_market_container(page, aliases: List[str]) -> Optional[str]:
-    """
-    Try to locate a market section by alias text. If found, return its inner HTML.
-    We try accessible roles/headings first; then a broad text search; finally return None.
-    """
-    # 1) headings / labels
-    for a in aliases:
-        try:
-            # headings/sections
-            loc = page.get_by_role("heading", name=re.compile(a, re.I))
-            if await loc.count() > 0:
-                el = loc.first
-                # bubble to a likely container
-                section = await el.locator("xpath=ancestor::*[self::section or self::div][1]").first.inner_html()
-                return section
-        except Exception:
-            pass
-
-    # 2) broad contains text
-    try:
-        for a in aliases:
-            loc = page.get_by_text(a, exact=False)
-            if await loc.count() > 0:
-                el = loc.first
-                container = await el.locator("xpath=ancestor::*[self::section or self::div][1]").first.inner_html()
-                return container
-    except Exception:
-        pass
-
-    # 3) fallback: full page HTML and let regex do work later
-    try:
-        return await page.content()
-    except Exception:
-        return None
-
-def parse_pairs_from_html(html: str) -> List[Dict[str, str]]:
-    """
-    Generic HTML parser that tries to pair player names with nearest American odds.
-    Very forgiving; you’ll still want to sanity-check downstream.
-    """
-    # Split into candidate lines/rows
-    # keep only short-ish chunks to reduce noise
-    chunks = [c.strip() for c in re.split(r"<[/]?[^>]+>", html)]
-    rows = []
-    for c in chunks:
-        if not c or len(c) > 80:
-            continue
-        # must contain odds
-        mo = RE_ODDS.search(c)
-        if not mo:
-            continue
-        odds = mo.group(1)
-        # look for a player nearby (same chunk or neighbors handled by caller)
-        name_match = RE_PLAYER.search(c)
-        name = name_match.group(1) if name_match else None
-        if name:
-            rows.append({"player": name, "odds": odds})
-    return rows
-
-async def scrape_market(page, aliases: List[str]) -> List[Dict[str, str]]:
-    """
-    Get rows for a market by alias list: [{'player':..., 'odds':...}, ...]
-    """
-    container_html = await find_market_container(page, aliases)
-    if not container_html:
-        return []
-
-    rows = parse_pairs_from_html(container_html)
-
-    # If we didn’t catch names within the same chunk, try a second pass:
-    if not rows:
-        # fallback: scan whole page
-        try:
-            all_html = await page.content()
-            rows = parse_pairs_from_html(all_html)
-        except Exception:
-            rows = []
-
-    # Dedup on (player, odds) while keeping order
-    seen = set()
-    cleaned = []
-    for r in rows:
-        key = (r["player"], r["odds"])
-        if r["player"] and r["odds"] and key not in seen:
-            seen.add(key)
-            cleaned.append(r)
-        if len(cleaned) >= MAX_ROWS_PER_MARKET:
-            break
-    return cleaned
-
-async def scrape_game(pw_ctx, entry: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Scrape a single event page (book-specific URL).
-    Returns dict with 'book','home','away','anytime','firsttd'
-    """
-    url = entry["url"]
-    browser = await pw_ctx.chromium.launch(headless=True, args=["--no-sandbox"])
-    page = await browser.new_page(user_agent=(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    ))
-    await goto_safely(page, url)
-    anytime = await scrape_market(page, MARKET_ALIASES["ANYTIME_TD"])
-    firsttd = await scrape_market(page, MARKET_ALIASES["FIRST_TD"])
-    await browser.close()
-    return {
-        "book": entry.get("book", "?"),
-        "home": entry.get("home", "?"),
-        "away": entry.get("away", "?"),
-        "url": url,
-        "anytime": anytime,
-        "firsttd": firsttd,
-    }
-
-def format_telegram_block(g: Dict[str, Any]) -> str:
-    """Pretty, compact Telegram message for one game."""
-    head = f"<b>{g['away']} @ {g['home']}</b> — <i>{g['book']}</i>"
-    ft_rows = "\n".join([f"• {r['player']}  <b>{r['odds']}</b>" for r in g.get("firsttd", [])]) or "• (none found)"
-    at_rows = "\n".join([f"• {r['player']}  <b>{r['odds']}</b>" for r in g.get("anytime", [])]) or "• (none found)"
-    tail = f"\n<code>{g['url']}</code>"
-    return f"{head}\n\n<b>First TD (top {MAX_ROWS_PER_MARKET}):</b>\n{ft_rows}\n\n<b>Anytime TD (top {MAX_ROWS_PER_MARKET}):</b>\n{at_rows}{tail}"
-
-async def main():
-    entries = load_game_urls()
-    if not entries:
-        send_telegram("⚠️ No game URLs found in config/game_urls.json. Add event pages to scrape.")
-        print("No game URLs to scrape. Exiting.")
-        return
-
-    async with async_playwright() as pw:
-        results = []
-        for e in entries:
-            try:
-                print(f"Scraping {e.get('book','?')} {e.get('away','?')}@{e.get('home','?')} …")
-                g = await scrape_game(pw, e)
-                results.append(g)
-            except Exception as ex:
-                print(f"Error scraping {e.get('url')}: {ex}")
-
-    # Send one message per game (cleaner for Telegram)
-    for g in results:
-        msg = format_telegram_block(g)
-        send_telegram(msg)
-        print(msg)  # also log to Actions
+        tg_send(f"⚠️ Scraper error: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
